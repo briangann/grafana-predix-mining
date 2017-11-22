@@ -1,0 +1,7 @@
+---
+applications:
+- name: grafana
+  memory: 512M
+  buildpack: binary_buildpack
+  path: code
+  random-route: true
