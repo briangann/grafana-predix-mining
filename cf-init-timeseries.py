@@ -40,32 +40,58 @@ def show_apps(cf_client):
         logger.debug('Application: %s', app_name)
 
 
-def get_application_guid(cf_client, application_name):
+def get_application_guid(cf_client, space_guid, application_name):
     """
     get app guid
     """
     for app in cf_client.apps:
-        # pprint(app)
-        if app['entity']['name'] == application_name:
+        if app['entity']['name'] == application_name and app['entity']['space_guid'] == space_guid:
+            #pprint(app)
             return app['metadata']['guid']
+    return None
 
 
-def get_trusted_issuer_id(cf_client, application_name):
+def get_application_uri(cf_client, space_guid, application_name):
+    """
+    get app uri
+    """
     for app in cf_client.apps:
-        if app['entity']['name'] == application_name:
+        if app['entity']['name'] == application_name and app['entity']['space_guid'] == space_guid:
+            #pprint(app)
             env = cf_client.apps.get_env(app['metadata']['guid'])
-            # pprint(env['system_env_json']['VCAP_SERVICES']['predix-uaa'][0])
-            issuerID = env['system_env_json']['VCAP_SERVICES']['predix-uaa'][0]['credentials']['issuerId']  # noqa
+            uri = env['application_env_json']['VCAP_APPLICATION']['application_uris'][0]
+            return uri
+    return None
+
+
+def get_trusted_issuer_id(cf_client, space_guid, application_name):
+    for app in cf_client.apps:
+        if app['entity']['name'] == application_name and app['entity']['space_guid'] == space_guid:
+            issuerID = None
+            try:
+                #pprint(app)
+                env = cf_client.apps.get_env(app['metadata']['guid'])
+                #pprint(app['metadata']['guid'])
+                # pprint(env['system_env_json']['VCAP_SERVICES']['predix-uaa'][0])
+                # this can fail is the uaa has not been created and bound
+                #pprint(env)
+                issuerID = env['system_env_json']['VCAP_SERVICES']['predix-uaa'][0]['credentials']['issuerId']  # noqa
+            except:
+                pass
             return issuerID
 
 
-def get_uaa_instance_uri(cf_client, application_name):
+def get_uaa_instance_uri(cf_client, space_guid, application_name):
     for app in cf_client.apps:
-        if app['entity']['name'] == application_name:
-            env = cf_client.apps.get_env(app['metadata']['guid'])
-            print env
-            # pprint(env['system_env_json']['VCAP_SERVICES']['predix-uaa'][0])
-            uaa_uri = env['system_env_json']['VCAP_SERVICES']['predix-uaa'][0]['credentials']['uri']  # noqa
+        if app['entity']['name'] == application_name and app['entity']['space_guid'] == space_guid:
+            uaa_uri = None
+            try:
+                env = cf_client.apps.get_env(app['metadata']['guid'])
+                print env
+                # pprint(env['system_env_json']['VCAP_SERVICES']['predix-uaa'][0])
+                uaa_uri = env['system_env_json']['VCAP_SERVICES']['predix-uaa'][0]['credentials']['uri']  # noqa
+            except:
+                pass
             return uaa_uri
 
 
@@ -99,7 +125,7 @@ def show_services(cf_client):
     show services
     """
     for service in cf_client.services:
-        pprint(service)
+        #pprint(service)
         service_name = service['entity']['label']
         logger.debug('Service Name: %s', service_name)
 
@@ -109,7 +135,7 @@ def get_service_guid(cf_client, service_name):
     get service guid
     """
     for service in cf_client.services:
-        # pprint(service)
+        #pprint(service)
         if service['entity']['label'] == service_name:
             return service['metadata']['guid']
 
@@ -141,7 +167,10 @@ def get_service_instance_guid(cf_client, name):
     """
     for service_instance in cf_client.service_instances:
         if service_instance['entity']['name'] == name:
-            return service_instance['metadata']['guid']
+            try:
+                return service_instance['metadata']['guid']
+            except:
+                return None
 
 
 def show_spaces(cf_client):
@@ -159,6 +188,22 @@ def get_space_guid(cf_client, space_name):
     for space in cf_client.spaces:
         if space['entity']['name'] == space_name:
             return space['metadata']['guid']
+    return None
+
+def space_exists(cf_client, space_name):
+    """
+    check if space exists
+    """
+    for space in cf_client.spaces:
+        if space['entity']['name'] == space_name:
+            return True
+    return False
+
+
+def create_space(c, space_name):
+    command = 'cf create-space {}'.format(space_name)
+    os.system(command)
+
 
 def setup_logger():
     global logger
@@ -172,6 +217,34 @@ def setup_logger():
     channel.setFormatter(formatter)
     logger.addHandler(channel)
 
+def push_grafana_app(client, app_name):
+    # cd to cf-grafana and do a cf push
+    os.chdir('cf-grafana')
+    os.system('cf push --no-start {} -f manifest.yml'.format(app_name))
+
+def start_grafana_app(client, app_name):
+    os.system('cf start {}'.format(app_name))
+
+def create_and_bind_timeseries(c, app_name):
+    logger.debug("Creating new time series service")
+    TIMESERIES_NAME = 'grafana-timeseries'
+    ts_creation_params = {
+        'trustedIssuerIds': [uaa_trusted_issuer_id]
+    }
+    try:
+        logger.debug("Creating Time Series service instance")
+        timeseries_instance = c.service_instances.create(
+            space_guid,
+            TIMESERIES_NAME,
+            timeseries_service_plan_guid,
+            ts_creation_params)
+        timeseries_instance_guid = timeseries_instance['metadata']['guid']
+        logger.debug("Binding to app")
+        bind_timeseries = c.service_bindings.create(
+            app_guid,
+            timeseries_instance_guid)
+    except:
+        pass
 
 def main():
     """
@@ -209,14 +282,25 @@ def main():
 
     # login to cloud foundry
     c = login(args.predix_username, args.predix_password)
-    # display the apps
-    # show_spaces(c)
-    # show_apps(c)
-    # show_services(c)
-    # show_plans(c)
-    # show_service_instances(c)
+
+    if not space_exists(c, args.predix_org_space):
+        create_space(c, args.predix_org_space)
+
+    # get the guid
     space_guid = get_space_guid(c, args.predix_org_space)
+    if space_guid is None:
+        print "Failed to get space guid"
+        exit(-1)
+
+    # target the space
+    command = 'cf target -s {}'.format(args.predix_org_space)
+    os.system(command)
+
     logger.debug('Space GUID: %s', space_guid)
+
+    #if not service_exists(c, 'predix-uaa'):
+    #    create_uaa_service(c, 'predix-uaa')
+
     uaa_service_guid = get_service_guid(c, 'predix-uaa')
     logger.debug('Predix UAA Service GUID: %s', uaa_service_guid)
     uaa_service_plan_guid = get_service_plan_guid(c, uaa_service_guid, 'Free')
@@ -233,44 +317,66 @@ def main():
     UAA_NAME = 'grafana-uaa'
     APP_NAME = 'grafana'
 
-    # get the trustedIssuerId from the bound app
-    uaa_trusted_issuer_id = get_trusted_issuer_id(c, APP_NAME)
-    logger.debug('UAA Trusted Issuer ID: %s', uaa_trusted_issuer_id)
+    # Check if there is a grafana app already pushed to the space
+    app_guid = get_application_guid(c, space_guid, APP_NAME)
+    pushed_app = False
+    if app_guid is None:
+        # need to push our app first
+        push_grafana_app(c, APP_NAME)
+        pushed_app = True
+        app_guid = get_application_guid(c, space_guid, APP_NAME)
 
+    logger.debug('APP GUID: %s', app_guid)
+    # get the application_uri for later
+    application_uri = get_application_uri(c, space_guid, APP_NAME)
+    # get the trustedIssuerId from the bound app
+    uaa_trusted_issuer_id = get_trusted_issuer_id(c, space_guid, APP_NAME)
+    logger.debug('UAA Trusted Issuer ID: %s', uaa_trusted_issuer_id)
     # Create our UAA Service
     creation_params = {
         'adminClientSecret': args.predix_uaa_admin_password
         }
-    try:
-        uaa_instance = c.service_instances.create(
-            space_guid,
-            UAA_NAME,
-            uaa_service_plan_guid,
-            creation_params)
-        uaa_instance_guid = uaa_instance['metadata']['guid']
-    except:
+    if uaa_trusted_issuer_id is None:
+        try:
+            logger.debug("No UAA found, creating one")
+            uaa_instance = c.service_instances.create(
+                space_guid,
+                UAA_NAME,
+                uaa_service_plan_guid,
+                creation_params)
+            uaa_instance_guid = uaa_instance['metadata']['guid']
+        except:
+            logger.debug("Failed to create UAA Instance, checking if existing service is not bound")
+            os.system('cf bind-service grafana grafana-uaa')
+            uaa_instance_guid = get_service_instance_guid(c, UAA_NAME)
+            if uaa_instance_guid is None:
+                print "not bound, something failed"
+                exit(-1)
+    else:
         uaa_instance_guid = get_service_instance_guid(c, UAA_NAME)
 
     logger.debug('UAA Service Instance GUID: %s', uaa_instance_guid)
 
-    # Get app guid
-    app_guid = get_application_guid(c, 'grafana-timeseries-dummy-app')
-    logger.debug('App GUID: %s', app_guid)
-
-    # now bind!
+    # now bind the uaa to the grafana app (it's ok to rebind, does not harm anything)
     try:
+        logger.debug("Binding uaa to grafana app")
         bind_uaa = c.service_bindings.create(app_guid, uaa_instance_guid)
     except:
         pass
 
     # get the trustedIssuerId from the bound app
-    # uaa_trusted_issuer_id = get_trusted_issuer_id(c, APP_NAME)
+    uaa_trusted_issuer_id = get_trusted_issuer_id(c, space_guid, APP_NAME)
+    logger.debug('UAA Trusted Issuer ID: %s', uaa_trusted_issuer_id)
 
     # now create a time series service instance
     timeseries_service_guid = get_service_guid(c, 'predix-timeseries')
-    logger.debug('Predix Time Series Service GUID: %s', timeseries_service_guid)
-    timeseries_service_plan_guid = get_service_plan_guid(c, timeseries_service_guid, 'Free')  # noqa
-    logger.debug('Predix Time Series Service Plan GUID: %s', timeseries_service_plan_guid)  # noqa
+    if timeseries_service_guid is None:
+        # need to create and bind timeseries service
+        create_and_bind_timeseries(c, APP_NAME)
+    else:
+        logger.debug('Predix Time Series Service GUID: %s', timeseries_service_guid)
+        timeseries_service_plan_guid = get_service_plan_guid(c, timeseries_service_guid, 'Free')  # noqa
+        logger.debug('Predix Time Series Service Plan GUID: %s', timeseries_service_plan_guid)  # noqa
 
     TIMESERIES_NAME = 'grafana-timeseries'
 
@@ -279,6 +385,7 @@ def main():
     }
 
     try:
+        logger.debug("Creating Time Series service instance")
         timeseries_instance = c.service_instances.create(
             space_guid,
             TIMESERIES_NAME,
@@ -286,6 +393,7 @@ def main():
             ts_creation_params)
         timeseries_instance_guid = timeseries_instance['metadata']['guid']
     except:
+        logger.debug("Getting Time Series service instance")
         timeseries_instance_guid = get_service_instance_guid(c, TIMESERIES_NAME)
 
     logger.debug('Time Series Service Instance GUID: %s', timeseries_instance_guid)
@@ -298,7 +406,7 @@ def main():
         pass
 
     # Inspect VCAP_SERVICES of our app to the get uaa_instance_url
-    uaa_instance_uri = get_uaa_instance_uri(c, APP_NAME)
+    uaa_instance_uri = get_uaa_instance_uri(c, space_guid, APP_NAME)
     logger.debug('UAA Instance URI: %s', uaa_instance_uri)
 
     # Inspect VCAP_SERVICES of our app to get the TimeSeries data needed for the UAA Client
@@ -349,14 +457,59 @@ def main():
     #  "grafana-asset.zones.da62139d-4000-401e-bdf2-b69a25ee088d.user"
 
     # uaac client update grafana-client --authorities "uaa.resource,predix-asset.zones.da62139d-4000-401e-bdf2-b69a25ee088d.user"
-    print '###########RUN THIS MANUALLY ###################'
-    print 'uaac target {}'.format(uaa_instance_uri)
-    print 'uaac token client get admin'
+    #print '###########RUN THIS MANUALLY ###################'
+    #print 'uaac target {}'.format(uaa_instance_uri)
+    #print 'uaac token client get admin'
     #print 'uaac client add mynewclient --authorities "uaa.resource,{},{},{}" --scope "openid" --autoapprove "openid" --authorized_grant_types "authorization_code,password,client_credentials,refresh_token" --secret iseegraphs'.format(timeseries_user_scope,timeseries_ingest_scope,timeseries_query_scope)
-    print 'uaac client add grafana-client --authorities "uaa.resource,{},{},{}" --scope "openid" --autoapprove "openid" --authorized_grant_types "password,client_credentials,refresh_token" --secret iseegraphs'.format(timeseries_user_scope,timeseries_ingest_scope,timeseries_query_scope)
-    print 'uaac client add ingestion-client --authorities "uaa.resource,{},{},{}" --scope "openid" --autoapprove "openid" --authorized_grant_types "password,client_credentials,refresh_token" --secret iseegraphs'.format(timeseries_user_scope,timeseries_ingest_scope,timeseries_query_scope)
-    # print 'uaac client update mynewclient --authorities "uaa.resource,{},{}"'.format(timeseries_user_scope,timeseries_ingest_scope)
-    print '################################################'
+    #print 'uaac client add grafana-client --authorities "uaa.resource,{},{},{}" --scope "openid" --autoapprove "openid" --authorized_grant_types "password,client_credentials,refresh_token" --secret iseegraphs'.format(timeseries_user_scope,timeseries_ingest_scope,timeseries_query_scope)
+    #print 'uaac client add ingestion-client --authorities "uaa.resource,{},{},{}" --scope "openid" --autoapprove "openid" --authorized_grant_types "password,client_credentials,refresh_token" --secret iseegraphs'.format(timeseries_user_scope,timeseries_ingest_scope,timeseries_query_scope)
+    ### note used: print 'uaac client update mynewclient --authorities "uaa.resource,{},{}"'.format(timeseries_user_scope,timeseries_ingest_scope)
+    ##print '################################################'
+
+    logger.debug("Granting access to grafana-client and ingest client")
+    os.system('uaac target {}'.format(uaa_instance_uri))
+    os.system('uaac token client get admin --secret {}'.format(args.predix_uaa_admin_password))
+    # remove existing clients
+    os.system('uaac client delete grafana-client')
+    os.system('uaac client delete ingestion-client')
+    logger.debug("Creating client grafana-client")
+    command = 'uaac client add grafana-client --authorities \
+        "uaa.resource,{},{},{}" --scope "openid" \
+        --autoapprove "openid" --authorized_grant_types \
+        "password,client_credentials,refresh_token" \
+        --secret {}'.format(
+            timeseries_user_scope,
+            timeseries_ingest_scope,
+            timeseries_query_scope,
+            args.predix_uaa_client_password)
+    pprint(command)
+    os.system(command)
+    logger.debug("Creating client ingestion-client")
+    command = 'uaac client add ingestion-client --authorities \
+        "uaa.resource,{},{},{}" --scope "openid" \
+        --autoapprove "openid" --authorized_grant_types \
+        "password,client_credentials,refresh_token" \
+        --secret {}'.format(
+            timeseries_user_scope,
+            timeseries_ingest_scope,
+            timeseries_query_scope,
+            args.predix_uaa_ingest_password)
+    pprint(command)
+    os.system(command)
+    # startup grafana
+    logger.debug("Starting GRAFANA")
+    start_grafana_app(c, APP_NAME)
+    ## Summarize what happened
+    logger.debug("################################################")
+    logger.debug('Grafana is ready to be used at URL: https://{}'.format(application_uri))
+    logger.debug('Use these datasource settings:')
+    logger.debug('Predix TS URL: https://time-series-store-predix.run.aws-usw02-pr.ice.predix.io')
+    logger.debug('Predix Zone ID: {}'.format(timeseries_zone_id))
+    logger.debug('UAA URL: {}/oauth/token'.format(uaa_instance_uri))
+    logger.debug('Client ID and Secret: grafana-client:{}'.format(args.predix_uaa_client_password))
+    logger.debug('Response Type: token')
+    logger.debug('Grant Type: client_credentials')
+    logger.debug('Origin: http://localhost')
 
 
 if __name__ == "__main__":
